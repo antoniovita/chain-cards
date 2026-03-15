@@ -7,6 +7,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {ICardRegistry} from "./interfaces/ICardRegistry.sol";
+import {IFeeModule} from "./interfaces/IFeeModule.sol";
 import {BattleLib} from "./libraries/BattleLib.sol";
 import {CommitLib} from "./libraries/CommitLib.sol";
 import {Errors} from "./libraries/Errors.sol";
@@ -18,6 +19,8 @@ contract DuelGame is Ownable, ReentrancyGuard {
     IERC20 public immutable stakeToken;
     ICardRegistry public immutable cardRegistry;
     uint64 public immutable revealTimeout;
+
+    IFeeModule public feeModule; // address(0) = disabled
 
     uint256 public nextMatchId = 1;
 
@@ -45,6 +48,8 @@ contract DuelGame is Ownable, ReentrancyGuard {
     event ChallengeCancelled(uint256 indexed matchId);
     event ForfeitClaimed(uint256 indexed matchId, address indexed winner, uint256 pot);
     event ElementAdvantageSet(uint8 indexed attacker, uint8 indexed defender, int8 outcome);
+    event FeeModuleSet(address indexed feeModule);
+    event FeePaid(uint256 indexed matchId, address indexed treasury, uint256 fee);
 
     constructor(
         IERC20 stakeToken_,
@@ -61,6 +66,33 @@ contract DuelGame is Ownable, ReentrancyGuard {
         revealTimeout = revealTimeout_;
 
         _setDefaultAdvantageTable();
+    }
+
+    function setFeeModule(address newFeeModule) external onlyOwner {
+        if (newFeeModule == address(0)) {
+            feeModule = IFeeModule(address(0));
+            emit FeeModuleSet(address(0));
+            return;
+        }
+
+        try IFeeModule(newFeeModule).treasury() returns (address t) {
+            if (t == address(0)) revert Errors.InvalidTreasury(t);
+        } catch {
+            revert Errors.InvalidFeeModule(newFeeModule);
+        }
+
+        try IFeeModule(newFeeModule).feeBps() returns (uint16 bps) {
+            try IFeeModule(newFeeModule).maxFeeBps() returns (uint16 maxBps) {
+                if (bps > maxBps) revert Errors.InvalidFeeBps(bps);
+            } catch {
+                revert Errors.InvalidFeeModule(newFeeModule);
+            }
+        } catch {
+            revert Errors.InvalidFeeModule(newFeeModule);
+        }
+
+        feeModule = IFeeModule(newFeeModule);
+        emit FeeModuleSet(newFeeModule);
     }
 
     function getMatchInfo(uint256 matchId)
@@ -176,13 +208,13 @@ contract DuelGame is Ownable, ReentrancyGuard {
         m.state = Types.MatchState.Resolved;
 
         if (m.revealedCreator && !m.revealedOpponent) {
-            stakeToken.safeTransfer(m.creator, pot);
+            _payoutWinner(matchId, m.creator, pot);
             emit ForfeitClaimed(matchId, m.creator, pot);
             return;
         }
 
         if (!m.revealedCreator && m.revealedOpponent) {
-            stakeToken.safeTransfer(m.opponent, pot);
+            _payoutWinner(matchId, m.opponent, pot);
             emit ForfeitClaimed(matchId, m.opponent, pot);
             return;
         }
@@ -253,10 +285,10 @@ contract DuelGame is Ownable, ReentrancyGuard {
         address winner = address(0);
         if (winsCreator > winsOpponent) {
             winner = m.creator;
-            stakeToken.safeTransfer(winner, pot);
+            _payoutWinner(matchId, winner, pot);
         } else if (winsOpponent > winsCreator) {
             winner = m.opponent;
-            stakeToken.safeTransfer(winner, pot);
+            _payoutWinner(matchId, winner, pot);
         } else {
             stakeToken.safeTransfer(m.creator, stake);
             stakeToken.safeTransfer(m.opponent, stake);
@@ -268,6 +300,24 @@ contract DuelGame is Ownable, ReentrancyGuard {
     function _elementalOutcome(uint8 elementA, uint8 elementB) private view returns (int8) {
         if (elementA >= 6 || elementB >= 6) return 0;
         return _advantage[elementA][elementB];
+    }
+
+    function _payoutWinner(uint256 matchId, address winner, uint256 pot) private {
+        IFeeModule module = feeModule;
+        if (address(module) == address(0)) {
+            stakeToken.safeTransfer(winner, pot);
+            return;
+        }
+
+        (uint256 fee, uint256 payout) = module.computeFee(pot);
+        if (fee != 0) {
+            address treasury = module.treasury();
+            if (treasury == address(0)) revert Errors.InvalidTreasury(treasury);
+            stakeToken.safeTransfer(treasury, fee);
+            emit FeePaid(matchId, treasury, fee);
+        }
+
+        stakeToken.safeTransfer(winner, payout);
     }
 
     function _setDefaultAdvantageTable() private {

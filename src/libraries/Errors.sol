@@ -8,6 +8,10 @@ library Errors {
     error InvalidMultiplier(uint16 multiplierBps);
     error InvalidRevealTimeout(uint64 revealTimeout);
 
+    error InvalidFeeModule(address feeModule);
+    error InvalidTreasury(address treasury);
+    error InvalidFeeBps(uint16 feeBps);
+
     error ZeroCardId();
     error InvalidCardStats();
     error InvalidElement(uint8 element);

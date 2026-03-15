@@ -5,6 +5,7 @@ import {Script} from "forge-std/Script.sol";
 
 import {CardRegistry} from "../src/CardRegistry.sol";
 import {DuelGame} from "../src/DuelGame.sol";
+import {FeeModule} from "../src/FeeModule.sol";
 import {MockERC20} from "../src/mocks/MockERC20.sol";
 import {ICardRegistry} from "../src/interfaces/ICardRegistry.sol";
 
@@ -13,15 +14,26 @@ contract DeployAnvil is Script {
     uint256 internal constant DEFAULT_ANVIL_PK =
         0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
 
-    function run() external returns (MockERC20 token, CardRegistry registry, DuelGame game) {
+    function run() external returns (MockERC20 token, CardRegistry registry, DuelGame game, FeeModule feeModule) {
         uint256 deployerKey = vm.envOr("PRIVATE_KEY", DEFAULT_ANVIL_PK);
         address deployer = vm.addr(deployerKey);
+        uint16 feeBpsDefault = uint16(vm.envOr("FEE_BPS_DEFAULT", uint256(200)));
+        address mintTo1 = vm.envOr("MINT_TO_1", deployer);
+        address mintTo2 = vm.envOr("MINT_TO_2", address(0));
+        uint256 mintAmount = vm.envOr("MINT_AMOUNT", uint256(10e18));
 
         vm.startBroadcast(deployerKey);
 
         token = new MockERC20("Duel USD", "DUSD");
+        if (mintTo1 == address(0)) mintTo1 = deployer;
+        token.mint(mintTo1, mintAmount);
+        if (mintTo2 != address(0) && mintTo2 != mintTo1) {
+            token.mint(mintTo2, mintAmount);
+        }
         registry = new CardRegistry(deployer);
+        feeModule = new FeeModule(deployer, deployer, feeBpsDefault);
         game = new DuelGame(token, registry, deployer, 1 days);
+        game.setFeeModule(address(feeModule));
 
         _registerInitialCards(registry);
 
@@ -36,4 +48,3 @@ contract DeployAnvil is Script {
         registry.createCardType(5, ICardRegistry.CardStats({combat: 6, defense: 5, speed: 9, element: 4, exists: false})); // Storm Hawk (Electric)
     }
 }
-
